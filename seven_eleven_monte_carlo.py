@@ -5,6 +5,8 @@ import os
 from math import radians, cos, sin, asin, sqrt
 import shapely
 import geopandas as gpd
+import tqdm
+import sqlite3
 
 dotenv.load_dotenv()
 GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
@@ -13,6 +15,8 @@ GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
 REVERSE_GEOLOCATION_API_BASE = "https://maps.googleapis.com/maps/api/geocode/json?latlng="
 PLACES_API_BASE = "https://places.googleapis.com/v1/places:searchText?fields=places.name,places.id,places.displayName,places.location&key="
 ROUTE_API_BASE = "https://maps.googleapis.com/maps/api/directions/json?destination="
+NEARBY_PLACES_API = "https://places.googleapis.com/v1/places:searchNearby?fields=places.displayName,places.formattedAddress,places.location,places.id,places.googleMapsLinks&key="
+
 
 def get_reverse_geolocation_api_call(latlng):
     api_call = REVERSE_GEOLOCATION_API_BASE
@@ -38,6 +42,25 @@ def get_route_api_call(destination, origin, transport_mode):
     api_call += "&key="
     api_call += GOOGLE_API_KEY
     return api_call
+
+def get_nearby_places_api_call(latlon):
+    api_call = NEARBY_PLACES_API
+    api_call += GOOGLE_API_KEY
+    lat, lon = latlon
+    payload = {
+        "includedTypes": ["convenience_store"],
+        "rankPreference": "DISTANCE",
+        "locationRestriction": {
+            "circle": {
+                "center": {
+                    "latitude": lat,
+                    "longitude": lon
+                },
+                "radius": 1000.0
+            }
+        }
+    }
+    return api_call, payload
 
 def haversine(lat1, lon1, lat2, lon2):
     """
@@ -67,17 +90,44 @@ polygon = shapely.geometry.Polygon([x1, x2, x4, x3, x1])
 gdf = gpd.GeoDataFrame(index=[0], crs='epsg:4326', geometry=[polygon])
 
 # sample points from this shape
-N_SAMPLE = 2
+N_SAMPLE = 3000
 sample_points = gdf.sample_points(N_SAMPLE)
 sample_points = list(sample_points[0].geoms)
 
 
 # transform coordinates into adresses with geolocation api
-for point in sample_points:
-    res = requests.get(get_reverse_geolocation_api_call((point.x, point.y)))
-    print(res.json()["results"][0]["formatted_address"])
+# for point in sample_points:
+#     res = requests.get(get_reverse_geolocation_api_call((point.x, point.y)))
+#     print(res.json()["results"][0]["formatted_address"])
 
-# Use NearbyAPI
+
+conn = sqlite3.connect("SevenElevenLocations.db")
+cursor = conn.cursor()
+cursor.execute("CREATE TABLE IF NOT EXISTS locations (id TEXT, formattedAddress TEXT, latitude REAL, longitude REAL, displayNameText TEXT, googleMapsLinksPlaceURI TEXT)")
+
+
+# Use NearbyAPI, results are limited to 20 locations
+for point in tqdm.tqdm(sample_points):
+    api_call, payload = get_nearby_places_api_call((point.x, point.y))
+    res = requests.post(api_call, data=json.dumps(payload))
+    # print(res.json())
+    if "places" in res.json():
+        locations = []
+        for location in res.json()["places"]:
+            id = location["id"]
+            formattedAddress = location["formattedAddress"]
+            latitude = location["location"]["latitude"]
+            longitude = location["location"]["longitude"]
+            displayNameText = location["displayName"]["text"]
+            googleMapsLinksPlaceURI = location["googleMapsLinks"]["placeUri"]
+            location_data = (id, formattedAddress, latitude, longitude, displayNameText, googleMapsLinksPlaceURI)
+            # print(location_data)
+            locations.append(location_data)
+        db_res = cursor.executemany("INSERT INTO locations VALUES(?, ?, ?, ?, ?, ?)", locations)
+        conn.commit()
+
+
+# SELECT DISTINCT * FROM locations WHERE displayNameText LIKE "%7-ELEVEN%"
 
 
 
