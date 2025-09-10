@@ -1,3 +1,7 @@
 .venv/
 .env
 *.db
+*.json
+ADMIN_LINE.*
+.ipynb_checkpoints/
+*.docx

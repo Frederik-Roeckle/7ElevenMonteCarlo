@@ -7,6 +7,8 @@ import shapely
 import geopandas as gpd
 import tqdm
 import sqlite3
+import pandas as pd
+import matplotlib.pyplot as plt
 
 dotenv.load_dotenv()
 GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
@@ -44,6 +46,7 @@ def get_route_api_call(destination, origin, transport_mode):
     return api_call
 
 def get_nearby_places_api_call(latlon):
+    """Results of this API are limited to 20 locations per response"""
     api_call = NEARBY_PLACES_API
     api_call += GOOGLE_API_KEY
     lat, lon = latlon
@@ -90,9 +93,11 @@ polygon = shapely.geometry.Polygon([x1, x2, x4, x3, x1])
 gdf = gpd.GeoDataFrame(index=[0], crs='epsg:4326', geometry=[polygon])
 
 # sample points from this shape
-N_SAMPLE = 3000
+N_SAMPLE = 10000
 sample_points = gdf.sample_points(N_SAMPLE)
 sample_points = list(sample_points[0].geoms)
+with open("Sample_Points_For_Finding_Stores.json", "w") as file:
+    json.dump([(str(point.x),str(point.y)) for point in sample_points], file)
 
 
 # transform coordinates into adresses with geolocation api
@@ -105,38 +110,69 @@ conn = sqlite3.connect("SevenElevenLocations.db")
 cursor = conn.cursor()
 cursor.execute("CREATE TABLE IF NOT EXISTS locations (id TEXT, formattedAddress TEXT, latitude REAL, longitude REAL, displayNameText TEXT, googleMapsLinksPlaceURI TEXT)")
 
-
-# Use NearbyAPI, results are limited to 20 locations
-for point in tqdm.tqdm(sample_points):
-    api_call, payload = get_nearby_places_api_call((point.x, point.y))
-    res = requests.post(api_call, data=json.dumps(payload))
-    # print(res.json())
-    if "places" in res.json():
-        locations = []
-        for location in res.json()["places"]:
-            id = location["id"]
-            formattedAddress = location["formattedAddress"]
-            latitude = location["location"]["latitude"]
-            longitude = location["location"]["longitude"]
-            displayNameText = location["displayName"]["text"]
-            googleMapsLinksPlaceURI = location["googleMapsLinks"]["placeUri"]
-            location_data = (id, formattedAddress, latitude, longitude, displayNameText, googleMapsLinksPlaceURI)
-            # print(location_data)
-            locations.append(location_data)
-        db_res = cursor.executemany("INSERT INTO locations VALUES(?, ?, ?, ?, ?, ?)", locations)
-        conn.commit()
-
-
-# SELECT DISTINCT * FROM locations WHERE displayNameText LIKE "%7-ELEVEN%"
+def get_nearby_places():
+    # Use NearbyAPI to find convenience store close to sample point
+    for point in tqdm.tqdm(sample_points):
+        api_call, payload = get_nearby_places_api_call((point.x, point.y))
+        res = requests.post(api_call, data=json.dumps(payload))
+        if "places" in res.json():
+            locations = []
+            for location in res.json()["places"]:
+                id = location["id"]
+                formattedAddress = location["formattedAddress"]
+                latitude = location["location"]["latitude"]
+                longitude = location["location"]["longitude"]
+                displayNameText = location["displayName"]["text"]
+                googleMapsLinksPlaceURI = location["googleMapsLinks"]["placeUri"]
+                location_data = (id, formattedAddress, latitude, longitude, displayNameText, googleMapsLinksPlaceURI)
+                locations.append(location_data)
+            db_res = cursor.executemany("INSERT INTO locations VALUES(?, ?, ?, ?, ?, ?)", locations)
+            conn.commit()
+get_nearby_places()
 
 
+def calculate_distances():
+    # Filter all unique 7-Eleven stores
+    req = cursor.execute(r"SELECT DISTINCT * FROM locations WHERE displayNameText LIKE '%7-ELEVEN%'")
+    stores = req.fetchall()
 
-# use places api text search to get all nearby 7Eleven around each place
-# 
-# MC sample coordinates over Bangkok (perhaps reverse geocode again into adresses)
-# 
-# Find shortest manhattan distance between sampled points and all 7/eleven locations
-#
-# (Use Route API to compute the walking distance as formula for coordinates-2-meter is complex 
+    # calculate min distance between each sample point and all 7-Eleven stores in the list
+    N_SAMPLE = 200000
+    sample_points = gdf.sample_points(N_SAMPLE)
+    sample_points = list(sample_points[0].geoms)
+    point_to_closest_store = {}
+    for point in tqdm.tqdm(sample_points):
+        shortest_dist = 10000
+        for store in stores:
+            if shortest_dist > haversine(point.x, point.y, store[2], store[3]):
+                shortest_dist = haversine(point.x, point.y, store[2], store[3])
+                point_to_closest_store[str(point.x) +","+str(point.y)] = (store[0], shortest_dist)
+        
+        # TODO: Use Route API to compute the walking distance
 
-# Note 
+    with open("mapping_point_closest_store.json", "w") as file:
+        json.dump(point_to_closest_store, file)
+
+calculate_distances()
+
+def visualize_mean_distance():
+    with open("mapping_point_closest_store.json", "r") as file:
+        point_to_closest_store = json.load(file)
+    n = 1
+    temporal_mean_average = []
+    mean_average = list(point_to_closest_store.values())[0][1]
+    for distance_mapping in list(point_to_closest_store.values()):
+        mean_average = mean_average + ((1/n) * (distance_mapping[1] - mean_average))
+        temporal_mean_average.append(mean_average)
+        n += 1
+    series_temporal_mean_average = pd.Series(temporal_mean_average)
+    plt.figure(figsize=(15,8))
+    series_temporal_mean_average.plot()
+    plt.title("Incremental Mean of Distance to Closest 7-Eleven")
+    plt.xlabel("Sample Index")
+    plt.ylabel("Mean Distance in meter")
+    plt.savefig("temporal_mean_average")
+
+    print(f"Final Average is: {mean_average}m.")
+
+visualize_mean_distance()
