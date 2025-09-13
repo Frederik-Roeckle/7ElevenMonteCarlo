@@ -9,23 +9,16 @@ import tqdm
 import sqlite3
 import pandas as pd
 import matplotlib.pyplot as plt
+from scipy.spatial import cKDTree
+import numpy as np
 
 dotenv.load_dotenv()
 GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
 
 # API
-REVERSE_GEOLOCATION_API_BASE = "https://maps.googleapis.com/maps/api/geocode/json?latlng="
 PLACES_API_BASE = "https://places.googleapis.com/v1/places:searchText?fields=places.name,places.id,places.displayName,places.location&key="
 ROUTE_API_BASE = "https://maps.googleapis.com/maps/api/directions/json?destination="
 NEARBY_PLACES_API = "https://places.googleapis.com/v1/places:searchNearby?fields=places.displayName,places.formattedAddress,places.location,places.id,places.googleMapsLinks&key="
-
-
-def get_reverse_geolocation_api_call(latlng):
-    api_call = REVERSE_GEOLOCATION_API_BASE
-    api_call += str(latlng[0]) + "," + str(latlng[1])
-    api_call += "&result_type=street_address&key="
-    api_call += GOOGLE_API_KEY
-    return api_call
 
 def get_places_api_call(text_search_query):
     api_call = PLACES_API_BASE
@@ -100,12 +93,6 @@ with open("Sample_Points_For_Finding_Stores.json", "w") as file:
     json.dump([(str(point.x),str(point.y)) for point in sample_points], file)
 
 
-# transform coordinates into adresses with geolocation api
-# for point in sample_points:
-#     res = requests.get(get_reverse_geolocation_api_call((point.x, point.y)))
-#     print(res.json()["results"][0]["formatted_address"])
-
-
 conn = sqlite3.connect("SevenElevenLocations.db")
 cursor = conn.cursor()
 cursor.execute("CREATE TABLE IF NOT EXISTS locations (id TEXT, formattedAddress TEXT, latitude REAL, longitude REAL, displayNameText TEXT, googleMapsLinksPlaceURI TEXT)")
@@ -128,43 +115,37 @@ def get_nearby_places():
                 locations.append(location_data)
             db_res = cursor.executemany("INSERT INTO locations VALUES(?, ?, ?, ?, ?, ?)", locations)
             conn.commit()
-get_nearby_places()
+# get_nearby_places()
 
+# Filter all unique 7-Eleven stores
+req = cursor.execute(r"SELECT DISTINCT * FROM locations WHERE displayNameText LIKE '%7-ELEVEN%'")
+stores = req.fetchall()
 
-def calculate_distances():
-    # Filter all unique 7-Eleven stores
-    req = cursor.execute(r"SELECT DISTINCT * FROM locations WHERE displayNameText LIKE '%7-ELEVEN%'")
-    stores = req.fetchall()
+def build_k_d_tree():
+    store_coords = np.array([(store[2], store[3]) for store in stores])
+    tree = cKDTree(store_coords)
+    return tree
+tree = build_k_d_tree()
 
-    # calculate min distance between each sample point and all 7-Eleven stores in the list
-    N_SAMPLE = 200000
-    sample_points = gdf.sample_points(N_SAMPLE)
+def calculate_distances_with_tree():
+    N_SAMPLE = 20000000
+    sample_points = gdf.sample_points(N_SAMPLE, method="uniform", rng=42)
     sample_points = list(sample_points[0].geoms)
-    point_to_closest_store = {}
-    for point in tqdm.tqdm(sample_points):
-        shortest_dist = 10000
-        for store in stores:
-            if shortest_dist > haversine(point.x, point.y, store[2], store[3]):
-                shortest_dist = haversine(point.x, point.y, store[2], store[3])
-                point_to_closest_store[str(point.x) +","+str(point.y)] = (store[0], shortest_dist)
-        
-        # TODO: Use Route API to compute the walking distance
-
-    with open("mapping_point_closest_store.json", "w") as file:
-        json.dump(point_to_closest_store, file)
-
-calculate_distances()
-
-def visualize_mean_distance():
-    with open("mapping_point_closest_store.json", "r") as file:
-        point_to_closest_store = json.load(file)
+    sample_coords = np.array([(point.x, point.y) for point in sample_points])
+    distances, indices = tree.query(sample_coords, k=1)
+    min_distances = [
+        haversine(sample_coords[i][0], sample_coords[i][1], stores[indices[i]][2], stores[indices[i]][3])
+        for i in range(len(sample_coords))
+    ]
     n = 1
     temporal_mean_average = []
-    mean_average = list(point_to_closest_store.values())[0][1]
-    for distance_mapping in list(point_to_closest_store.values()):
-        mean_average = mean_average + ((1/n) * (distance_mapping[1] - mean_average))
+    mean_average = min_distances[0]
+    for distance in min_distances[1:]:
+        mean_average = mean_average + ((1/n) * (distance - mean_average))
         temporal_mean_average.append(mean_average)
         n += 1
+        if(n % 100000 == 0):
+            print(f"Temporal Mean Average at n={str(n)} is: {mean_average}")
     series_temporal_mean_average = pd.Series(temporal_mean_average)
     plt.figure(figsize=(15,8))
     series_temporal_mean_average.plot()
@@ -174,5 +155,4 @@ def visualize_mean_distance():
     plt.savefig("temporal_mean_average")
 
     print(f"Final Average is: {mean_average}m.")
-
-visualize_mean_distance()
+calculate_distances_with_tree()

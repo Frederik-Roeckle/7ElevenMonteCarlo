@@ -5,3 +5,4 @@
 ADMIN_LINE.*
 .ipynb_checkpoints/
 *.docx
+*.tmp
