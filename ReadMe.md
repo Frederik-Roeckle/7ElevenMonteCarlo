@@ -1,3 +1,9 @@
+# How far away is the next 7-Eleven in Bangkok?
+This is the GitHub Repository to the blog post ...
+
+
+
+
 ### Google APIs
 - https://developers.google.com/maps/documentation/geocoding/requests-reverse-geocoding
 - https://developers.google.com/maps/documentation/places/web-service/nearby-search
